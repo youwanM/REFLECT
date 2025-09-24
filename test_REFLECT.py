@@ -42,27 +42,19 @@ def compute_dice(anomaly_map, segmentation, th):
     return dice
 
 
-def dsc_max(anomaly_maps, segmentations):
+def dsc(anomaly_maps, segmentations, dice_threshold):
     dice_scores = []
-    ths = np.linspace(0, 1, 101)
-    best_dsc = 0
-    threshold = 0
-    for dice_threshold in ths:
-        dice_scores = []
-        for k in range(len(anomaly_maps)):
-            dice = compute_dice(copy.deepcopy(np.asarray(anomaly_maps[k]).flatten()), copy.deepcopy(np.asarray(segmentations[k]).flatten()), dice_threshold)
-            dice_scores.append(dice)
-        if np.mean(dice_scores) > best_dsc:
-            best_dsc = np.mean(dice_scores)
-            threshold = dice_threshold
-    return best_dsc, threshold
+    for k in range(len(anomaly_maps)):
+        dice = compute_dice(copy.deepcopy(np.asarray(anomaly_maps[k]).flatten()), copy.deepcopy(np.asarray(segmentations[k]).flatten()), dice_threshold)
+        dice_scores.append(dice)
+    return np.mean(dice_scores)
     
     
-def calculate_metrics(ground_truth, prediction):
+def calculate_metrics(ground_truth, prediction, threshold):
     flat_gt = ground_truth.flatten()
     flat_pred = prediction.flatten()
     
-    max_dicescore, threshold  = dsc_max(prediction, ground_truth)
+    dicescore  = dsc(prediction, ground_truth, threshold)
     
     auroc = metrics.AUROC()
     auroc_score = auroc(torch.from_numpy(flat_pred), torch.from_numpy(flat_gt.astype(int)))
@@ -72,12 +64,12 @@ def calculate_metrics(ground_truth, prediction):
     
     ap = average_precision_score(ground_truth.flatten(), prediction.flatten())
     
-    return auroc_score.cpu().numpy() ,f1_max_score.cpu().numpy(), ap, max_dicescore, threshold
+    return auroc_score.cpu().numpy() ,f1_max_score.cpu().numpy(), ap, dicescore
 
 
 def visualize(anomaly_maps, segmentations, xs, image_samples, args):
     counter = -1
-    base_dir = os.path.join(args.parent_dir, f'visualization/validation_{args.backward_steps}_backward_steps/')
+    base_dir = os.path.join(args.parent_dir, f'visualization/test_{args.backward_steps}_backward_steps/')
     os.makedirs(base_dir, exist_ok=True)
     os.makedirs(os.path.join(base_dir, f'inputs'), exist_ok=True)
     os.makedirs(os.path.join(base_dir, f'overlays'), exist_ok=True)
@@ -153,17 +145,17 @@ def evaluate(x0s, segmentations, encodeds,  image_samples, latent_samples, args)
         gt = np.stack(gt, axis=0)
         gt = (gt>0).astype(np.int32)
 
-        auroc_score ,f1_max_score, ap, max_dicescore, threshold = calculate_metrics(gt, anomaly_maps)
-        with open(os.path.join(args.parent_dir, f'results_with_{args.backward_steps}_backward_steps_validation.txt'), 'w') as f:
-            f.write('max Dice score:{:.4f}\nmax Dice score threshold:{:.4f}\nGlobal max Dice score: {:.4f}\nAUROC: {:.4f}\nAP: {:.4f}'.format(
-                np.round(max_dicescore, 4),
-                np.round(threshold, 4),
+        auroc_score ,f1_max_score, ap, dicescore = calculate_metrics(gt, anomaly_maps, args.threshold)
+        with open(os.path.join(args.parent_dir, f'results_with_{args.backward_steps}_backward_steps.txt'), 'w') as f:
+            f.write('ice score:{:.4f}\nThreshold:{:.4f}\nGlobal max Dice score: {:.4f}\nAUROC: {:.4f}\nAP: {:.4f}'.format(
+                np.round(dicescore, 4),
+                np.round(args.threshold, 4),
                 np.round(f1_max_score, 4),
                 np.round(auroc_score, 4),
                 np.round(ap,4)
             ))
             
-        return anomaly_maps, {'max Dice score':np.round(max_dicescore, 4),'max Dice score threshold':np.round(threshold, 4), 'Global max Dice score': np.round(f1_max_score, 4), 'AUROC':np.round(auroc_score, 4), 'AP':np.round(ap,4)}
+        return anomaly_maps, {'max Dice score':np.round(dicescore, 4),'max Dice score threshold':np.round(args.threshold, 4), 'Global max Dice score': np.round(f1_max_score, 4), 'AUROC':np.round(auroc_score, 4), 'AP':np.round(ap,4)}
 
 
 
@@ -208,14 +200,14 @@ def main(args):
     ])
     
     if args.dataset == 'BraTS':
-        val_dataset = BraTS2021Dataset('val', rootdir=args.data_dir, transform=transform, image_size=args.image_size, augment=False, modality=args.modality, embedding_dim=embedding_dim, compression_factor=compression_factor)
-        val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, drop_last=False)
+        test_dataset = BraTS2021Dataset('test', rootdir=args.data_dir, transform=transform, image_size=args.image_size, augment=False, modality=args.modality, embedding_dim=embedding_dim, compression_factor=compression_factor)
+        test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, drop_last=False)
     else:
-        val_dataset = ATLASDataset('val', rootdir=args.data_dir, transform=transform, image_size=args.image_size, augment=False, modality=args.modality, embedding_dim=embedding_dim, compression_factor=compression_factor)
-        val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, drop_last=False)
+        test_dataset = ATLASDataset('test', rootdir=args.data_dir, transform=transform, image_size=args.image_size, augment=False, modality=args.modality, embedding_dim=embedding_dim, compression_factor=compression_factor)
+        test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, drop_last=False)
     
     
-    print(f"Dataset contains {len(val_dataset)} Validation images.")
+    print(f"Dataset contains {len(test_dataset)} Test images.")
 
     x_s = []
     encoded_s = []
@@ -227,7 +219,7 @@ def main(args):
     print('=-='*20)
     print('Starting evaluation...')
     print('=-='*20)
-    for ii, (x, mask, seg) in enumerate(val_loader):
+    for ii, (x, mask, seg) in enumerate(test_loader):
         with torch.no_grad():
             # Map input images to latent space + normalize latents:
             encoded = vae.encode(x.to(device)).mean.mul_(0.18215)#Normalization params got from LDM package
@@ -265,6 +257,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--model-path", type=str)
     parser.add_argument("--backward-steps", type=int, default=5)
+    parser.add_argument("--threshold", type=float, default=0.5)
     
 
     args = parser.parse_args()

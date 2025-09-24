@@ -1,0 +1,9 @@
+REFLECT*
+checkpoints/
+venv*/
+wandb/
+dtd/
+Data/
+OAR*
+*.pyc
+*.pyc

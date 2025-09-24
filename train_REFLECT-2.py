@@ -21,6 +21,8 @@ from medical_models import UNET_models
 from transformers import get_cosine_schedule_with_warmup
 from MedicalDataLoader import BraTS2021Dataset, ATLASDataset
 from huggingface_hub import hf_hub_download
+import wandb
+import datetime
 
 
 
@@ -92,6 +94,36 @@ def main(args):
     torch.cuda.set_device(device)
     
     logger = create_logger_and_dirs(args)
+
+    if rank == 0:
+        # Define phonetic alphabet
+        phonetic_alphabet = [
+            "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel",
+            "India", "Juliett", "Kilo", "Lima", "Mike", "November", "Oscar", "Papa",
+            "Quebec", "Romeo", "Sierra", "Tango", "Uniform", "Victor", "Whiskey",
+            "X-ray", "Yankee", "Zulu"
+        ]
+
+        # Get current date and time
+        now = datetime.datetime.now()
+
+        # Determine indices based on current hour and day
+        hour_index = now.hour % len(phonetic_alphabet)
+        day_index = now.day % len(phonetic_alphabet)
+
+        # Construct run name
+        if now.day > 25:
+            additional_code = f"-{phonetic_alphabet[(now.day - 26) % len(phonetic_alphabet)]}"
+            run_name = f"{phonetic_alphabet[hour_index]} {phonetic_alphabet[day_index]} {additional_code}"
+        else:
+            run_name = f"{phonetic_alphabet[hour_index]} {phonetic_alphabet[day_index]}"
+
+        # Initialize wandb
+        wandb.init(
+            project="REFLECT-2-FM",   # change project name if needed
+            name=run_name,
+            config=vars(args),
+        )
     
     logger.info(f"Starting rank={rank}, seed={seed}, world_size={dist.get_world_size()}.")
 
@@ -226,6 +258,7 @@ def main(args):
             
             log_steps += 1
             train_steps += 1
+
             if train_steps % args.log_every == 0:
                 # Measure training speed:
                 torch.cuda.synchronize()
@@ -236,6 +269,14 @@ def main(args):
                 dist.all_reduce(avg_loss, op=dist.ReduceOp.SUM)
                 avg_loss = avg_loss.item() / dist.get_world_size()
 
+                if rank == 0:
+                        wandb.log({
+                            "train/step": train_steps,
+                            "train/loss": avg_loss,
+                            "train/steps_per_sec": steps_per_sec,
+                            "train/epoch": epoch,
+                        })
+            
                 logger.info(f"(step={train_steps:07d}) MSE Loss: {avg_loss:.4f}, Train Steps/Sec: {steps_per_sec:.2f}")
                 # Reset monitoring variables:
                 running_loss = 0
@@ -259,22 +300,24 @@ def main(args):
 
 
     logger.info("Done!")
+    if rank == 0:
+        wandb.finish()
     cleanup()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--epochs", type=int, default=52)
     parser.add_argument("--warmup-epochs", type=int, default=0)
-    parser.add_argument("--global-batch-size", type=int, default=96)
+    parser.add_argument("--global-batch-size", type=int, default=30)
     parser.add_argument("--global-seed", type=int, default=10)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--ckpt-every", type=int, default=10)
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--local-rank", type=int, default=0)
-    parser.add_argument("--data-dir", type=str, default='.')
-    parser.add_argument("--dtd-dir", type=str, default='.')
-    parser.add_argument("--REFLECT-1-path", type=str, default='.')
+    parser.add_argument("--data-dir", type=str, default='Data/')
+    parser.add_argument("--dtd-dir", type=str, default='dtd/')
+    parser.add_argument("--REFLECT-1-path", type=str, default='REFLECT_ATLAS_UNet_L_T1_256_kl_f4/002-UNet_L-T1/checkpoints/last.pt')
     parser.add_argument("--augmentation", type=lambda v: True if v.lower() in ('yes','true','t','y','1') else False, default=True)
     parser.add_argument("--max-objects", type=int, default=4)
     parser.add_argument("--backward-steps", type=int, default=5)
