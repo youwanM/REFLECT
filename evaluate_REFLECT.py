@@ -11,6 +11,7 @@ from medical_models import UNET_models
 from MedicalDataLoader import BraTS2021Dataset, ATLASDataset
 from huggingface_hub import hf_hub_download
 from anomalib import metrics
+from tqdm import tqdm
 from sklearn.metrics import average_precision_score
 import cv2
 from PIL import Image
@@ -47,7 +48,7 @@ def dsc_max(anomaly_maps, segmentations):
     ths = np.linspace(0, 1, 101)
     best_dsc = 0
     threshold = 0
-    for dice_threshold in ths:
+    for dice_threshold in tqdm(ths, desc="Searching best Dice threshold"):
         dice_scores = []
         for k in range(len(anomaly_maps)):
             dice = compute_dice(copy.deepcopy(np.asarray(anomaly_maps[k]).flatten()), copy.deepcopy(np.asarray(segmentations[k]).flatten()), dice_threshold)
