@@ -76,14 +76,15 @@ def calculate_metrics(ground_truth, prediction):
     return auroc_score.cpu().numpy() ,f1_max_score.cpu().numpy(), ap, max_dicescore, threshold
 
 
-def visualize(anomaly_maps, segmentations, xs, image_samples, args):
+def visualize(anomaly_maps, segmentations, xs, image_samples, filenames, args):
     counter = -1
     base_dir = os.path.join(args.parent_dir, f'visualization/validation_{args.backward_steps}_backward_steps/')
     os.makedirs(base_dir, exist_ok=True)
     os.makedirs(os.path.join(base_dir, f'inputs'), exist_ok=True)
     os.makedirs(os.path.join(base_dir, f'overlays'), exist_ok=True)
+    os.makedirs(os.path.join(base_dir, f'counterfactuals'), exist_ok=True)
 
-    for anomaly_map, segmentation, x, image_sample in zip(anomaly_maps, segmentations, xs, image_samples):
+    for anomaly_map, segmentation, x, image_sample, filename in zip(anomaly_maps, segmentations, xs, image_samples, filenames):
         counter += 1
         visualization_image = np.zeros((4*args.image_size, args.image_size, 3), dtype=np.uint8)
 
@@ -117,17 +118,17 @@ def visualize(anomaly_maps, segmentations, xs, image_samples, args):
         visualization_image[3*args.image_size:, :] = anomal_map_img
 
         # --- Save everything ---
-        Image.fromarray(visualization_image).save(os.path.join(base_dir, f'{counter}_visualization.png'))
-        Image.fromarray(input_image).save(os.path.join(base_dir, f'inputs/{counter}_input.png'))
-        #Image.fromarray(output_image).save(os.path.join(base_dir, f'{counter}_output.png'))
+        Image.fromarray(visualization_image).save(os.path.join(base_dir, f'{filename}_visualization.png'))
+        Image.fromarray(input_image).save(os.path.join(base_dir, f'inputs/{filename}_input.png'))
+        Image.fromarray(output_image).save(os.path.join(base_dir, f'counterfactuals/{filename}_coutnerfactual.png'))
 
         # anomaly_map is 2D (H, W)
         anomaly_gray = (anomaly_map*255).astype(np.uint8)
         if anomaly_gray.ndim == 3 and anomaly_gray.shape[0] == 1:  # squeeze (1,H,W)
             anomaly_gray = anomaly_gray[0]
-        #Image.fromarray(anomaly_gray, mode="L").save(os.path.join(base_dir, f'{counter}_anomaly.png'))
+        #Image.fromarray(anomaly_gray, mode="L").save(os.path.join(base_dir, f'{filename}_anomaly.png'))
 
-        Image.fromarray(anomal_map_img).save(os.path.join(base_dir, f'overlays/{counter}_overlay.png'))
+        Image.fromarray(anomal_map_img).save(os.path.join(base_dir, f'overlays/{filename}_overlay.png'))
         #Image.fromarray(seg_vis).save(os.path.join(base_dir, f'{counter}_mask.png'))
 
 
@@ -224,11 +225,12 @@ def main(args):
     latent_samples_s = []
     x0_s = []
     segmentation_s = []
+    filenames = []
     
     print('=-='*20)
     print('Starting evaluation...')
     print('=-='*20)
-    for ii, (x, mask, seg) in enumerate(val_loader):
+    for ii, (x, mask, seg, fname) in enumerate(val_loader):
         with torch.no_grad():
             # Map input images to latent space + normalize latents:
             encoded = vae.encode(x.to(device)).mean.mul_(0.18215)#Normalization params got from LDM package
@@ -251,11 +253,13 @@ def main(args):
             image_samples_s += [_image_samples.unsqueeze(0) for _image_samples in image_samples]
             latent_samples_s += [_latent_samples.unsqueeze(0) for _latent_samples in latent_sample]
             x0_s += [_x0.unsqueeze(0) for _x0 in x0]
+            filenames += [os.path.splitext(os.path.basename(f))[0] for f in fname]
 
     anomaly_maps, results = evaluate(x0_s, segmentation_s, encoded_s,  image_samples_s, latent_samples_s, args)
+    
     for key, val in results.items():
         print(key, ' : ', val)
-    visualize(anomaly_maps, segmentation_s, x0_s, image_samples_s, args)
+    visualize(anomaly_maps, segmentation_s, x0_s, image_samples_s, filenames, args)
     print('=-='*20)
 
 if __name__ == "__main__":

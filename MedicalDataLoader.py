@@ -304,7 +304,8 @@ class ATLASDataset(Dataset):
         else:
             seg = np.array(Image.open(self.seg_paths[index]).convert('L').resize((self.image_size, self.image_size))).astype(np.uint8)
             mask = np.zeros_like(seg) #return a mask of zeros during val/test, not used
-            return img, mask, seg.astype(np.float32)
+            fname = os.path.basename(self.image_paths[index])
+            return img, mask, seg.astype(np.float32), fname
             
             
    
