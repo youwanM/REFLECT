@@ -195,7 +195,6 @@ class BraTS2021Dataset(Dataset):
         
    
    
-
 class ATLASDataset(Dataset):
     """ATLAS dataset."""
 
