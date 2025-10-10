@@ -23,7 +23,9 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from metrics.hausdorff_distance import compute_hausdorff_distance
 from metrics.surface_distance import compute_average_surface_distance
+from metrics.froc import compute_fp_tp_probs_componentwise, compute_froc_curve_data, compute_froc_score
 import numpy as np
+import pickle
 
 
 def smooth_mask(mask, sigma=1.0):
@@ -494,7 +496,151 @@ def compute_froc(anomaly_maps, anoGT, segmentations, filenames, FFPI_thresholds=
     plt.savefig(os.path.join(args.parent_dir,"froc_curve.png"))
     plt.close()
     return froc_df
-    
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import os
+from scipy.ndimage import label
+
+def compute_froc_monai(
+    anomaly_maps,
+    anoGT,
+    segmentations,
+    filenames,
+    eval_thresholds=(0.25, 0.5, 1, 2, 3),
+    save_dir=None,
+    click_radius=5,
+    prob_threshold=0.036,
+):
+    """
+    Compute FROC curve and AUFROC using MONAI-like logic but component-based.
+
+    - Ground-truth evaluation masks are 5x5 (radius=2) around click coordinates.
+    - Predictions are obtained from connected components above a given probability threshold.
+    - Each component is assigned its max probability as detection score.
+
+    Parameters
+    ----------
+    anomaly_maps : list[np.ndarray]
+        Predicted anomaly probability maps.
+    anoGT : pd.DataFrame
+        Ground-truth DataFrame with columns ['SubjectID','x','y'].
+    segmentations : unused placeholder (for API compatibility).
+    filenames : list[str]
+        Identifiers corresponding to anomaly_maps.
+    eval_thresholds : tuple[float]
+        FFPI thresholds for computing FROC score.
+    save_dir : str, optional
+        Directory to save FROC curve plot.
+    click_radius : int
+        Half-size of the square region around GT click. (2 → 5×5 region)
+    prob_threshold : float
+        Threshold for binarizing anomaly maps before component extraction.
+
+    Returns
+    -------
+    results : dict
+        {
+          'fps_per_image': np.ndarray,
+          'total_sensitivity': np.ndarray,
+          'froc_score': float
+        }
+    """
+    n_images = len(filenames)
+    print(f"Evaluating {n_images} images for FROC computation...")
+
+    fp_probs, tp_probs = [], []
+    total_targets = 0
+
+    for amap, fname in zip(anomaly_maps, filenames):
+        # --- Step 1. Build evaluation mask from GT clicks (5x5 squares) ---
+        gt_coords = anoGT[anoGT["SubjectID"] == fname][["y", "x"]].values
+        eval_mask = np.zeros_like(amap, dtype=np.uint8)
+
+        for y, x in gt_coords:
+            y, x = int(round(y)), int(round(x))
+            y1, y2 = max(0, y - click_radius), min(amap.shape[0], y + click_radius + 1)
+            x1, x2 = max(0, x - click_radius), min(amap.shape[1], x + click_radius + 1)
+            eval_mask[y1:y2, x1:x2] = 1
+
+        # Skip images with no GT
+        if eval_mask.sum() == 0:
+            continue
+
+        # --- Step 2. Threshold anomaly map to create binary mask ---
+        bin_map = (amap >= prob_threshold).astype(np.uint8)
+        labeled_map, num_components = label(bin_map)
+
+        if num_components == 0:
+            continue
+
+        # --- Step 3. Extract component masks and probabilities ---
+        probs = []
+        component_masks = []
+
+        for comp_id in range(1, num_components + 1):
+            comp_mask = (labeled_map == comp_id)
+            if np.any(comp_mask):
+                component_masks.append(comp_mask)
+                probs.append(float(amap[comp_mask].max()))
+
+        # --- Step 4. Compute FP and TP probabilities (component-based) ---
+        fpp, tpp, num_targets = compute_fp_tp_probs_componentwise(
+            probs=probs,
+            component_masks=component_masks,
+            evaluation_mask=eval_mask,
+            labels_to_exclude=None
+        )
+
+        fp_probs.extend(fpp)
+        tp_probs.extend(tpp)
+        total_targets += num_targets
+
+    # --- Step 5. Check if valid detections exist ---
+    if total_targets == 0 or (len(tp_probs) == 0 and len(fp_probs) == 0):
+        print("⚠️ No valid detections or ground-truth targets found — returning empty results.")
+        return {"fps_per_image": [], "total_sensitivity": [], "froc_score": 0.0}
+
+    fp_probs = np.array(fp_probs)
+    tp_probs = np.array(tp_probs)
+
+    # --- Step 6. Compute FROC curve data ---
+    fps_per_image, total_sensitivity = compute_froc_curve_data(
+        fp_probs, tp_probs, total_targets, num_images=n_images
+    )
+
+    # --- Step 7. Compute FROC score ---
+    froc_score = compute_froc_score(fps_per_image, total_sensitivity, eval_thresholds)
+
+
+    # --- Step 8. Plot FROC curve ---
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(fps_per_image, total_sensitivity, marker="o", label="FROC")
+    ax.set_xlabel("False Positives per Image (FPPI)")
+    ax.set_ylabel("Sensitivity")
+    ax.set_title(f"FROC Curve (thr={prob_threshold}, 5x5 GT Region)")
+    ax.grid(True, linestyle="--", alpha=0.6)
+    ax.legend()
+
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+        # Save as static image
+        fig.savefig(os.path.join(save_dir, "froc_curve.png"))
+        # Save as serialized figure
+        with open(os.path.join(save_dir, "froc_curve.fig.pickle"), "wb") as f:
+            pickle.dump(fig, f)
+
+    plt.close(fig)
+
+    print(f"✅ FROC Score (mean sensitivity @ {eval_thresholds}): {froc_score:.4f}")
+
+    return {
+        "fps_per_image": fps_per_image,
+        "total_sensitivity": total_sensitivity,
+        "froc_score": froc_score,
+    }
+
 
 def calculate_metrics(ground_truth, prediction, filenames, threshold):
     flat_gt = ground_truth.flatten()
@@ -507,7 +653,7 @@ def calculate_metrics(ground_truth, prediction, filenames, threshold):
     #per_image_f1_components_df(prediction, anoGT, ground_truth, filenames, threshold=0.036016).to_csv(os.path.join(args.parent_dir, f'lesion_f1_per_image_{args.backward_steps}_backward_steps_test.csv'), index=False)
 
     #froc_df = compute_froc(prediction, anoGT, ground_truth, filenames)
-    
+    #compute_froc_monai(prediction, anoGT, ground_truth, filenames, eval_thresholds=[0.25, 0.5, 1, 2],save_dir=args.parent_dir)
     metrics_df  = compute_metrics_per_subject(prediction, ground_truth, filenames, threshold)
 
 
@@ -522,7 +668,7 @@ def calculate_metrics(ground_truth, prediction, filenames, threshold):
     #ap = average_precision_score(ground_truth.flatten(), prediction.flatten())
     
     #return auroc_score.cpu().numpy() ,f1_max_score.cpu().numpy(), ap, metrics_df
-    return
+    return metrics_df
 
 
 def visualize(anomaly_maps, segmentations, xs, image_samples, filenames, args):
@@ -606,9 +752,9 @@ def evaluate(x0s, segmentations, encodeds,  image_samples, latent_samples, filen
         gt = (gt>0).astype(np.int32)
 
         #auroc_score ,f1_max_score, ap, metrics_df = calculate_metrics(gt, anomaly_maps, filenames, args.threshold)
-        calculate_metrics(gt, anomaly_maps, filenames, args.threshold)
-        #save_path = os.path.join(args.parent_dir, f"dice_stratification_{args.threshold}_test.csv")
-        #metrics_df.to_csv(save_path, index=False)
+        metrics_df = calculate_metrics(gt, anomaly_maps, filenames, args.threshold)
+        save_path = os.path.join(args.parent_dir, f"dice_stratification_{args.threshold}_test.csv")
+        metrics_df.to_csv(save_path, index=False)
         #with open(os.path.join(args.parent_dir, f'results_with_{args.backward_steps}_backward_steps_test.txt'), 'w') as f:
         #    f.write('Threshold:{:.4f}\nGlobal max Dice score: {:.4f}\nAUROC: {:.4f}\nAP: {:.4f}'.format(
         #        np.round(args.threshold, 4),
@@ -718,7 +864,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--local-rank", type=int, default=0)
-    parser.add_argument("--data-dir", type=str, default='Data/allTest/')
+    parser.add_argument("--data-dir", type=str, default='Data/')
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--model-path", type=str)
     parser.add_argument("--backward-steps", type=int, default=5)
